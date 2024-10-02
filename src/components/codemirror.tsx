@@ -4,7 +4,7 @@ import { Extension, StateEffect } from '@codemirror/state'
 import styles from './codemirror.module.css'
 import { oneDark } from '@codemirror/theme-one-dark'
 import { EditorView } from '@codemirror/view'
-import { theme, errorLog, PersistenceState, isNewSaveStrat, RoomState, RoomParticipant } from '../lib/state'
+import { theme, errorLog, PersistenceState, isNewSaveStrat, RoomState, RoomParticipant, ConnectionStatus } from '../lib/state'
 import { Diagnostic, setDiagnosticsEffect } from '@codemirror/lint'
 import { Signal, useSignal, useSignalEffect } from '@preact/signals'
 import { Awareness } from 'y-protocols/awareness'
@@ -12,6 +12,7 @@ import { WebrtcProvider } from 'y-webrtc'
 import * as Y from 'yjs'
 import { startSavingGame } from './big-interactive-pages/editor'
 import { yCollab } from 'y-codemirror.next'
+import { PersistenceStateKind } from '../lib/state'
 
 interface CodeMirrorProps {
 	class?: string | undefined
@@ -36,7 +37,6 @@ export default function CodeMirror(props: CodeMirrorProps) {
 			let timer: NodeJS.Timeout;
 			const checkUpdated = () => {
 				if (initialUpdate === false) {
-					console.log("Fjsakfjsa")
 					clearTimeout(timer);
 					resolve();
 				} else {
@@ -66,8 +66,7 @@ export default function CodeMirror(props: CodeMirrorProps) {
 		if (editorRef?.state.doc.toString() === lastCode) return
 		lastCode = editorRef?.state.doc.toString()
 		onCodeChangeRef.current?.()
-		yCollabSignal.value
-	}, () => onRunShortcutRef.current?.());
+	}, () => onRunShortcutRef.current?.(), yCollabSignal.value as Extension);
 
 	const setEditorTheme = () => {
 		if (theme.value === "dark") {
@@ -88,12 +87,12 @@ export default function CodeMirror(props: CodeMirrorProps) {
 					if(props.persistenceState === undefined) throw new Error("Persistence state is undefined");
 					if(state.saved == "saved"){
 						let persistenceState = props.persistenceState.peek();
-						if(persistenceState.kind === "PERSISTED" && persistenceState.game !== "LOADING"){
+						if((persistenceState.kind === PersistenceStateKind.PERSISTED || persistenceState.kind === PersistenceStateKind.COLLAB) && persistenceState.game !== "LOADING"){
 							props.persistenceState.value = {...persistenceState, cloudSaveState: "SAVED"};
 						}
 					} else if(state.saved == "error"){
 						let persistenceState = props.persistenceState.peek();
-						if(persistenceState.kind === "PERSISTED" && persistenceState.game !== "LOADING"){
+						if((persistenceState.kind === PersistenceStateKind.PERSISTED || persistenceState.kind === PersistenceStateKind.COLLAB) && persistenceState.game !== "LOADING"){
 							props.persistenceState.value = {...persistenceState, cloudSaveState: "ERROR"};
 						}
 					}
@@ -103,13 +102,10 @@ export default function CodeMirror(props: CodeMirrorProps) {
 			});
 		});
 	});
-	useSignalEffect(() => {
-		if(editorRef !== undefined) {
-			editorRef.destroy()
-		}
+	useEffect(() => {
 		if (!parent.current) throw new Error('Oh golly! The editor parent ref is null')
 
-		if(!isNewSaveStrat.value || (props.roomState?.value.roomId === "" || props.persistenceState?.peek().session === null)){
+		if(!isNewSaveStrat.value){
 			const editor = new EditorView({
 				state: createEditorState(props.initialCode ? props.initialCode : '', () => {
 					if (editor.state.doc.toString() === lastCode) return
@@ -118,7 +114,6 @@ export default function CodeMirror(props: CodeMirrorProps) {
 				}, () => onRunShortcutRef.current?.()),
 				parent: parent.current,
 			})
-
 			setEditorRef(editor);
 			props.onEditorView?.(editor)
 			return
@@ -133,21 +128,21 @@ export default function CodeMirror(props: CodeMirrorProps) {
 			if(provider !== undefined){
 				provider.destroy();
 			}
+			props.roomState.value = { ...props.roomState.value, connectionStatus: ConnectionStatus.CONNECTING };
 			yDoc = new Y.Doc();
-			console.log(import.meta.env.PUBLIC_SIGNALING_SERVER_HOST)
+			let persistenceState = props.persistenceState.peek();
 			provider = new WebrtcProvider(props.roomState.value.roomId, yDoc, {
 				signaling: [
-					import.meta.env.PUBLIC_SIGNALING_SERVER_HOST,
+					import.meta.env.PUBLIC_SIGNALING_SERVER_HOST as string,
 				],
+				// password: ((persistenceState.kind === PersistenceStateKind.PERSISTED && persistenceState.game !== "LOADING" && persistenceState.game.password) ? persistenceState.game.password : "")
 			});
 			//get yjs document from provider
 			let ytext = yDoc.getText("codemirror");
 			const yUndoManager = new Y.UndoManager(ytext);
 
 			yProviderAwarenessSignal.value = provider.awareness
-			console.log(props.persistenceState.peek().session?.user)
-			let persistenceState = props.persistenceState.peek();
-			const isHost = ((persistenceState.kind == "PERSISTED" && persistenceState.game != "LOADING") && persistenceState.session?.user.id === persistenceState.game.ownerId)
+			const isHost = ((persistenceState.kind == PersistenceStateKind.PERSISTED && persistenceState.game != "LOADING") && persistenceState.session?.user.id === persistenceState.game.ownerId)
 			provider.awareness.setLocalStateField("user", {
 				name:
 					props.persistenceState.peek().session?.user.email ??
@@ -167,20 +162,25 @@ export default function CodeMirror(props: CodeMirrorProps) {
 				if (ytext.toString() === "") {
 					ytext.insert(0, lastCode ?? "");
 				}
-				if (!parent.current)
-					throw new Error("Oh golly! The editor parent ref is null");
-				const editor = new EditorView({
-					state: createEditorState(ytext.toString(), () => {
-						if (editor.state.doc.toString() === lastCode) return
-						lastCode = editor.state.doc.toString()
-						onCodeChangeRef.current?.()
-					}, () => onRunShortcutRef.current?.(), yCollabSignal.peek() as Extension),
-					parent: parent.current,
+				if(editorRef === undefined) {
+					if (!parent.current)
+						throw new Error("Oh golly! The editor parent ref is null");
+					const editor = new EditorView({
+						state: createEditorState(ytext.toString(), () => {
+							if (editor.state.doc.toString() === lastCode) return
+							lastCode = editor.state.doc.toString()
+							onCodeChangeRef.current?.()
+						}, () => onRunShortcutRef.current?.(), yCollabSignal.peek() as Extension),
+						parent: parent.current,
+					})
+					setEditorRef(editor);
+					props.onEditorView?.(editor)
+				} else editorRef.dispatch({
+					effects: StateEffect.reconfigure.of(restoreInitialConfig())
 				})
-
-				setEditorRef(editor);
-				props.onEditorView?.(editor)
-			});
+				if(props.roomState)
+					props.roomState.value = { ...props.roomState?.value, connectionStatus: ConnectionStatus.CONNECTED };
+		});
 			yDoc.on("update", () => {
 				if(!props.persistenceState) return;
 				if (!initialUpdate) return;
@@ -198,9 +198,9 @@ export default function CodeMirror(props: CodeMirrorProps) {
 				if(props.roomState)
 					props.roomState.value.participants = participants;
 				let persistenceState = props.persistenceState.peek();
-				if(persistenceState.kind === "PERSISTED" && persistenceState.game !== "LOADING"){
+				if(persistenceState.kind === PersistenceStateKind.PERSISTED && persistenceState.game !== "LOADING"){
 					if(persistenceState.game.ownerId === persistenceState.session?.user.id){
-						startSavingGame(props.persistenceState);
+						startSavingGame(props.persistenceState, props.roomState);
 					}
 				}
 				ytext = yDoc.getText("codemirror");
@@ -209,7 +209,7 @@ export default function CodeMirror(props: CodeMirrorProps) {
 		} catch(e){
 			window.location.reload();
 		}
-	})
+	}, [])
 
 	useEffect(() => {
 		setEditorTheme();

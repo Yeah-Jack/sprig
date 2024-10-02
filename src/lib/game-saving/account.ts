@@ -6,6 +6,7 @@ import { customAlphabet } from 'nanoid/async'
 import { lazy } from '../utils/lazy'
 import { generateGameName } from '../words'
 import metrics from '../../../metrics'
+import { RoomParticipant } from '../state'
 
 const numberid = customAlphabet('0123456789')
 
@@ -34,6 +35,11 @@ export interface User {
 	createdAt: Timestamp
 	email: string
 	username: string | null
+	githubAccessToken?: string
+	githubId?: string
+	githubUsername?: string
+	failedLoginAttempts?: number
+	lockoutUntil?: Timestamp
 }
 
 export interface Session {
@@ -53,6 +59,11 @@ export interface Game {
 	code: string
 	tutorialName?: string
 	tutorialIndex?: number
+	roomParticipants?: RoomParticipant[]
+	isRoomOpen?: boolean
+	password?: string
+	isPublished?: boolean
+	githubPR?: string
 }
 
 export interface LoginCode {
@@ -245,10 +256,12 @@ export const getGame = async (id: string | undefined): Promise<Game | null> => {
 }
 
 export const makeGame = async (ownerId: string, unprotected: boolean, name?: string, code?: string, tutorialName?: string, tutorialIndex?: number): Promise<Game> => {
+	
+	const createdDate = Timestamp.now()
 	const data = {
 		ownerId,
-		createdAt: Timestamp.now(),
-		modifiedAt: Timestamp.now(),
+		createdAt: createdDate,
+		modifiedAt: createdDate,
 		unprotected,
 		name: name ?? generateGameName(),
 		code: code ?? '',
@@ -320,4 +333,8 @@ export const getSnapshotData = async (id: string): Promise<SnapshotData | null> 
 		ownerName: user?.username ?? snapshot.ownerName,
 		code: snapshot.code
 	}
+}
+
+export const updateUserGitHubToken = async (userId: string, githubAccessToken: string, githubId: string, githubUsername: string): Promise<void> => {
+    await updateDocument('users', userId, { githubAccessToken, githubId, githubUsername });
 }
